@@ -381,6 +381,7 @@ let locale = supportedLocales.includes(savedLocale) ? savedLocale :
   (supportedLocales.includes(browserLocale) ? browserLocale : 'en');
 let expandedLeaders = false;
 let rankingData = { country: null, leaders: null, messages: null };
+let connectionState = 'connecting';
 let turnstileToken = '';
 let widgetId = null;
 let submitting = false;
@@ -422,6 +423,7 @@ function applyLanguage() {
     if (translated) element.textContent = translated;
   }
   $('demoBanner').textContent = messages[locale].banner;
+  $('connectionStatus').textContent = messages[locale][connectionState];
   $('lang').setAttribute('aria-label', messages[locale].switchLanguage);
   $('turnstileBox').setAttribute('aria-label', messages[locale].securityCheck);
   menuToggle.textContent = '☰ ' + translations[locale].menuLabel;
@@ -501,7 +503,8 @@ async function karmaRPC(name) {
   return rows;
 }
 async function refreshKarma() {
-  $('connectionStatus').textContent = messages[locale].connecting;
+  connectionState = 'connecting';
+  $('connectionStatus').textContent = messages[locale][connectionState];
   const results = await Promise.allSettled([
     karmaRPC('get_karma_country_ranking'),
     karmaRPC('get_karma_leader_ranking'),
@@ -510,8 +513,9 @@ async function refreshKarma() {
   for (const [index, key] of ['country', 'leaders', 'messages'].entries())
     rankingData[key] = results[index].status === 'fulfilled' ? results[index].value : null;
   renderPublicData();
-  $('connectionStatus').textContent = results.every(result => result.status === 'fulfilled')
-    ? messages[locale].connectionReady : messages[locale].connectionPartial;
+  connectionState = results.every(result => result.status === 'fulfilled')
+    ? 'connectionReady' : 'connectionPartial';
+  $('connectionStatus').textContent = messages[locale][connectionState];
 }
 function resetTurnstile() {
   turnstileToken = '';
@@ -529,7 +533,13 @@ function renderTurnstile() {
     size: matchMedia('(max-width: 440px)').matches ? 'compact' : 'flexible',
     callback: token => { turnstileToken = token; setFormStatus(''); },
     'expired-callback': () => { turnstileToken = ''; },
-    'error-callback': () => { turnstileToken = ''; setFormStatus('formCaptcha'); }
+    'error-callback': code => {
+      turnstileToken = '';
+      const configurationError = ['110100', '110110', '110200', '400020', '400021', '400070'].includes(String(code));
+      if (configurationError) $('sendMessage').disabled = true;
+      setFormStatus(configurationError ? 'formUnavailable' : 'formCaptcha');
+      return true;
+    }
   });
 }
 function loadTurnstile() {
