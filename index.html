@@ -537,7 +537,7 @@ function renderTurnstile() {
       turnstileToken = '';
       const configurationError = ['110100', '110110', '110200', '400020', '400021', '400070'].includes(String(code));
       if (configurationError) $('sendMessage').disabled = true;
-      setFormStatus(configurationError ? 'formUnavailable' : 'formCaptcha');
+      setFormStatus(configurationError ? 'formUnavailable' : 'formCaptcha'); console.warn('Turnstile error code:', String(code));
       return true;
     }
   });
