@@ -70,3 +70,12 @@ REVOKE ALL ON FUNCTION public.submit_karma_message(text, text, text)
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.submit_karma_message(text, text, text)
   TO service_role;
+
+
+-- The public site reads through the three safe RPCs above.
+-- Legacy views must not offer direct access to private or pending rows.
+REVOKE ALL PRIVILEGES ON TABLE
+  public.karma_country_ranking,
+  public.karma_leader_ranking,
+  public.karma_public_messages
+FROM PUBLIC, anon, authenticated;
