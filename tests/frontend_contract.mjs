@@ -1,0 +1,43 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {JSDOM} from 'jsdom';
+const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
+const source=html.match(/<script>([\s\S]*?)<\/script>/)[1];
+const dom=new JSDOM(html,{url:'https://karma-096.github.io/the-karma-experiment/',runScripts:'outside-only',pretendToBeVisual:true});
+const w=dom.window,d=w.document;let widget,postResult={success:true},postStatus=200;const posts=[];
+w.matchMedia=()=>({matches:true});w.AbortSignal=AbortSignal;
+w.fetch=async(url,options)=>{if(url.includes('/rest/v1/'))return Response.json(url.endsWith('get_karma_stats')?[{participants:0,countries:0,transfers:0}]:[]);posts.push(JSON.parse(options.body));return Response.json(postResult,{status:postStatus});};
+w.turnstile={render:(box,options)=>(widget=options,'synthetic-widget'),remove:()=>{},reset:()=>{}};
+w.localStorage.setItem('karma-lang','en');
+w.eval(source+';window.__qa={translations,messages,setData:data=>{rankingData=data;renderPublicData();}};');
+w.onKarmaTurnstileLoaded();
+const tick=async()=>{await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));};
+await tick();
+const keys=[...new Set([...Array.from(d.querySelectorAll('[data-i]'),x=>x.dataset.i),'formSuccess','formInvalid','formConsent','formCaptcha','formUnavailable','formExpired','formDuplicate','formTooLarge','formServerLimit','dataLoading','securityWaiting','securityReady','securityFailed','countryPrompt','nicknamePrompt','viewLess'])];
+for(const language of ['en','ru','fr','de','es','pt']){
+ d.querySelector('#lang').value=language;d.querySelector('#lang').dispatchEvent(new w.Event('change'));
+ assert.equal(d.documentElement.lang,language);assert.equal(widget.language,language);assert.equal(widget.action,'karma_wall');assert.equal(widget.size,'compact');
+ for(const key of keys)assert.ok(w.__qa.translations[language][key],language+' '+key);
+ assert.equal(d.querySelector('#nickname').placeholder,w.__qa.messages[language].nicknamePrompt);
+ assert.equal(d.querySelector('#country').options[0].text,w.__qa.messages[language].countryPrompt);
+}
+d.querySelector('#lang').value='en';d.querySelector('#lang').dispatchEvent(new w.Event('change'));
+const countries=['DE','FR','ES','PT','RU','GB','US','CA','AU','JP','BR'];
+w.__qa.setData({country:countries.map((country_code,i)=>({country_code,rank:i+1})),leaders:countries.map((country_code,i)=>({country_code,nickname:'Synthetic '+i,rank:i+1})),messages:[{country_code:'DE',nickname:'<script>test</script>',message:'<img src=x onerror=alert(1)>'}],stats:{participants:11,countries:11,transfers:11}});
+assert.equal(d.querySelectorAll('#rankList li').length,10);assert.equal(d.querySelectorAll('#leaderList li').length,10);
+d.querySelector('#viewAllCountries').click();d.querySelector('#viewAll').click();assert.equal(d.querySelectorAll('#rankList li').length,11);assert.equal(d.querySelectorAll('#leaderList li').length,11);
+assert.equal(d.querySelector('#wallList img'),null);assert.equal(d.querySelector('#wallList script'),null);assert.match(d.querySelector('#wallList').textContent,/<img/);
+const setGood=()=>{d.querySelector('#nickname').value='SYNTHETIC_TEST';d.querySelector('#country').value='DE';d.querySelector('#message').value='Synthetic test';d.querySelector('#consent').checked=true;};
+const send=async()=>{d.querySelector('#wishForm').dispatchEvent(new w.Event('submit',{cancelable:true}));await tick();};
+setGood();d.querySelector('#consent').checked=false;await send();assert.equal(posts.length,0);assert.equal(d.querySelector('#formResult').dataset.key,'formConsent');
+setGood();await send();assert.equal(posts.length,0);assert.equal(d.querySelector('#formResult').dataset.key,'formCaptcha');
+widget.callback('synthetic-token');await send();assert.equal(posts.length,1);assert.equal(posts[0].country_code,'DE');assert.equal(posts[0].turnstile_token,'synthetic-token');assert.equal(d.querySelector('#formResult').dataset.key,'formSuccess');
+widget.callback('new-synthetic-token');assert.equal(d.querySelector('#formResult').dataset.key,'formSuccess','Token refresh must preserve the success confirmation');
+w.localStorage.removeItem('karma-last-message-at');setGood();postResult={code:'duplicate_submission'};postStatus=409;await send();assert.equal(d.querySelector('#formResult').dataset.key,'formDuplicate');
+widget.callback('synthetic-token');postResult={code:'verification_expired'};postStatus=403;await send();assert.equal(d.querySelector('#formResult').dataset.key,'formExpired');
+widget.callback('synthetic-token');postResult={code:'request_too_large'};postStatus=413;await send();assert.equal(d.querySelector('#formResult').dataset.key,'formTooLarge');
+widget.callback('synthetic-token');postResult={code:'rate_limited'};postStatus=429;await send();assert.equal(d.querySelector('#formResult').dataset.key,'formServerLimit');
+for(const value of ['usdt-tron','btc-bitcoin','eth-ethereum','usdc-base','bnb-bsc']){d.querySelector('#cryptoAsset').value=value;d.querySelector('#cryptoAsset').dispatchEvent(new w.Event('change'));assert.ok(d.querySelector('#cryptoNetwork').textContent);}
+assert.equal(d.querySelector('#address'),null);assert.equal(d.querySelector('#walletLive'),null);assert.ok(!html.includes('TMaCiw2')&&!html.includes('0x098D7BC'),'Public preparation page must not contain a receiving address');
+dom.window.close();
+console.log(`PASS: six languages, ${keys.length} required labels per language, safe text rendering, top-10/full lists, submission errors and disabled payments (local DOM tests).`);

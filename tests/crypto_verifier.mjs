@@ -1,0 +1,46 @@
+import assert from 'node:assert/strict';
+import {id} from 'ethers';
+import {ASSETS,bitcoinAddress,tronHex,verifyOnProvider,verifyWithTwoProviders} from '../scripts/verify-crypto.mjs';
+const recipient='0x1111111111111111111111111111111111111111',sender='0x2222222222222222222222222222222222222222';
+const hash='0x'+'a'.repeat(64),blockHash='0x'+'b'.repeat(64),topic=a=>'0x'+'0'.repeat(24)+a.slice(2);
+let chain=1,status='0x1',tip='0x78',finalized='0x78',contract=ASSETS['usdc-base'].contract,removed=false,value='0xde0b6b3a7640000',nativeRecipient=recipient;
+const evmFetcher=async(url,options)=>{
+ const q=JSON.parse(options.body);let result;
+ const tx={hash,from:sender,to:nativeRecipient,value,chainId:'0x'+chain.toString(16),blockHash};
+ const receipt={transactionHash:hash,status,blockNumber:'0x64',blockHash,logs:[{address:contract,topics:[id('Transfer(address,address,uint256)'),topic(sender),topic(recipient)],data:'0x'+(1000000n).toString(16).padStart(64,'0'),removed,logIndex:'0x0',transactionHash:hash,blockHash}]};
+ if(q.method==='eth_chainId')result='0x'+chain.toString(16);
+ else if(q.method==='eth_getTransactionByHash')result=tx;
+ else if(q.method==='eth_getTransactionReceipt')result=receipt;
+ else if(q.method==='eth_getBlockByNumber')result={number:q.params[0]==='latest'?tip:q.params[0]==='finalized'?finalized:'0x64',hash:blockHash};
+ else throw new Error('Unexpected or non-read-only method');
+ return Response.json({jsonrpc:'2.0',id:q.id,result});
+};
+for(const assetId of ['eth-ethereum','usdc-base','bnb-bsc']){chain=ASSETS[assetId].chainId;assert.equal((await verifyOnProvider(assetId,hash,{endpoint:'https://provider-a.invalid',recipient,fetcher:evmFetcher})).confirmed,true,assetId);}
+chain=1;await assert.rejects(verifyOnProvider('usdc-base',hash,{endpoint:'https://provider-a.invalid',recipient,fetcher:evmFetcher}),/Wrong chain/);
+chain=8453;contract=sender;await assert.rejects(verifyOnProvider('usdc-base',hash,{endpoint:'https://provider-a.invalid',recipient,fetcher:evmFetcher}),/No supported/);contract=ASSETS['usdc-base'].contract;
+removed=true;await assert.rejects(verifyOnProvider('usdc-base',hash,{endpoint:'https://provider-a.invalid',recipient,fetcher:evmFetcher}),/Invalid token log/);removed=false;
+status='0x0';await assert.rejects(verifyOnProvider('usdc-base',hash,{endpoint:'https://provider-a.invalid',recipient,fetcher:evmFetcher}),/Failed/);status='0x1';
+finalized='0x63';assert.equal((await verifyOnProvider('usdc-base',hash,{endpoint:'https://provider-a.invalid',recipient,fetcher:evmFetcher})).confirmed,false);finalized='0x78';
+tip='0x65';assert.equal((await verifyOnProvider('usdc-base',hash,{endpoint:'https://provider-a.invalid',recipient,fetcher:evmFetcher})).confirmed,false);tip='0x78';
+const combined=await verifyWithTwoProviders('usdc-base',hash,{endpoints:['https://provider-a.invalid','https://provider-b.invalid'],recipient,fetcher:evmFetcher});assert.equal(combined.confirmed,true);assert.equal(combined.verified,false);assert.equal(combined.publication_eligible,false);
+await assert.rejects(verifyWithTwoProviders('usdc-base',hash,{endpoints:['https://same.invalid/a','https://same.invalid/b'],recipient,fetcher:evmFetcher}),/Two independently/);
+chain=1;nativeRecipient=sender;await assert.rejects(verifyOnProvider('eth-ethereum',hash,{endpoint:'https://provider-a.invalid',recipient,fetcher:evmFetcher}),/Wrong recipient/);nativeRecipient=recipient;
+value='0x0';await assert.rejects(verifyOnProvider('eth-ethereum',hash,{endpoint:'https://provider-a.invalid',recipient,fetcher:evmFetcher}),/No supported/);value='0x1';
+const btc='bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',btcHash='a'.repeat(64),btcBlock='b'.repeat(64),genesis='000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f';
+let btcPending=false,selfInput=false;
+const btcFetcher=async url=>url.endsWith('/block-height/0')?new Response(genesis):url.includes('/block-height/')?new Response(btcBlock):url.endsWith('tip/height')?new Response('105'):Response.json({txid:btcHash,vin:selfInput?[{prevout:{scriptpubkey_address:btc}}]:[],vout:[{scriptpubkey_address:btc,value:1000}],status:{confirmed:!btcPending,block_height:100,block_hash:btcBlock}});
+assert.equal((await verifyOnProvider('btc-bitcoin',btcHash,{endpoint:'https://esplora.invalid',recipient:btc,fetcher:btcFetcher})).confirmed,true);
+btcPending=true;assert.equal((await verifyOnProvider('btc-bitcoin',btcHash,{endpoint:'https://esplora.invalid',recipient:btc,fetcher:btcFetcher})).confirmed,false);btcPending=false;
+selfInput=true;await assert.rejects(verifyOnProvider('btc-bitcoin',btcHash,{endpoint:'https://esplora.invalid',recipient:btc,fetcher:btcFetcher}),/Own-wallet/);
+assert.throws(()=>bitcoinAddress('bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080'),/checksum/);
+const tronRecipient=ASSETS['usdt-tron'].contract,tronTarget=tronHex(tronRecipient).slice(2),tronHash='a'.repeat(64),tronGenesis=ASSETS['usdt-tron'].genesis;let tronContract=tronTarget;
+const tronFetcher=async(url,options)=>{
+ const body=JSON.parse(options.body);
+ if(url.endsWith('getblockbynum'))return Response.json({blockID:body.num===0?tronGenesis:'c'.repeat(64)});
+ if(url.endsWith('getnowblock'))return Response.json({block_header:{raw_data:{number:120}}});
+ return Response.json({id:tronHash,blockNumber:100,receipt:{result:'SUCCESS'},log:[{address:tronContract,topics:[id('Transfer(address,address,uint256)').slice(2),'0'.repeat(24)+'2'.repeat(40),'0'.repeat(24)+tronTarget],data:(1000000n).toString(16).padStart(64,'0')}]});
+};
+assert.equal((await verifyOnProvider('usdt-tron',tronHash,{endpoint:'https://tron.invalid',recipient:tronRecipient,tronGenesis,fetcher:tronFetcher})).confirmed,true);
+tronContract='1'.repeat(40);await assert.rejects(verifyOnProvider('usdt-tron',tronHash,{endpoint:'https://tron.invalid',recipient:tronRecipient,tronGenesis,fetcher:tronFetcher}),/official USDT/);
+await assert.rejects(verifyOnProvider('usdt-tron',tronHash,{endpoint:'https://tron.invalid',recipient:tronRecipient,tronGenesis:'0'.repeat(64),fetcher:tronFetcher}),/mainnet genesis/);
+console.log('PASS: five-asset verifier, network/asset/recipient checks, finality, pending/failed/self transfers, independent evidence and address checksums (synthetic provider fixtures).');
