@@ -11,15 +11,21 @@ const source = original.replace(/import \{ createClient \} from 'npm:@supabase\/
 assert.notEqual(source, original, 'The actual production import must be replaced for this isolated mock test');
 await writeFile(path, source);
 let handler, rateAllowed=true, writeError=null, verify={success:true,hostname:'karma-096.github.io',action:'karma_wall'}, fetchError=false;
-let verificationCalls=0, writeCalls=0, rateCalls=0, envMissing=false;
+let verificationCalls=0, writeCalls=0, rateCalls=0, envMissing=false, requestNonce=0;
+const claimedTokens=new Set();
 globalThis.Deno={env:{get:name=>envMissing?undefined:({TURNSTILE_SECRET_KEY:'synthetic-secret',SUPABASE_URL:'https://synthetic.invalid',SUPABASE_SERVICE_ROLE_KEY:'synthetic-service'})[name]},serve:fn=>handler=fn};
 globalThis.__client=()=>({rpc:async(name,params)=>{
   if(name==='check_karma_message_rate_limit'){rateCalls++;assert.match(params.p_client_hash,/^[a-f0-9]{64}$/);return {data:rateAllowed,error:null};}
+  if(name==='claim_karma_turnstile_token'){
+    assert.match(params.p_token_hash,/^[a-f0-9]{64}$/);
+    if(claimedTokens.has(params.p_token_hash))return {data:false,error:null};
+    claimedTokens.add(params.p_token_hash);return {data:true,error:null};
+  }
   assert.equal(name,'submit_karma_message');writeCalls++;return {data:'synthetic-id',error:writeError};
 }});
 globalThis.fetch=async(url,options)=>{assert.equal(url,'https://challenges.cloudflare.com/turnstile/v0/siteverify');verificationCalls++;if(fetchError)throw new Error('synthetic unavailable');return Response.json(verify);};
 const good={nickname:'KARMA_TEST',country_code:'DE',message:'Synthetic contract test',turnstile_token:'synthetic-token',consent:true};
-const req=(body=good,headers={},method='POST',raw=false)=>new Request('https://synthetic.invalid/submit',{method,headers:{Origin:'https://karma-096.github.io','Content-Type':'application/json','x-forwarded-for':'198.51.100.1',...headers},...(method==='POST'?{body:raw?body:JSON.stringify(body)}:{})});
+const req=(body=good,headers={},method='POST',raw=false)=>new Request('https://synthetic.invalid/submit',{method,headers:{Origin:'https://karma-096.github.io','Content-Type':'application/json','x-forwarded-for':'198.51.100.1',...headers},...(method==='POST'?{body:raw?body:JSON.stringify(body===good?{...good,turnstile_token:'synthetic-token-'+ ++requestNonce}:body)}:{})});
 let checks=0;
 async function check(name,request,status,expectedCode,verifyDelta=0,writeDelta=0){
  const v=verificationCalls,w=writeCalls;const response=await handler(request);
@@ -47,7 +53,9 @@ try{
  for(const [name,value] of [['hostname',{success:true,hostname:'foreign.invalid',action:'karma_wall'}],['action',{success:true,hostname:'karma-096.github.io',action:'other'}]]){verify=value;await check(name,req(),403,'security_verification_failed',1);}
  verify={success:true,hostname:'karma-096.github.io',action:'karma_wall'};
  fetchError=true;await check('Siteverify unavailable',req(),503,'verification_unavailable',1);fetchError=false;
- const success=await check('mocked success',req(),200,null,1,1);assert.equal((await success.json()).success,true);
+ const replayBody={...good,turnstile_token:'synthetic-replay-token'};
+ const success=await check('mocked success',req(replayBody),200,null,1,1);assert.equal((await success.json()).success,true);
+ await check('provider accepts replay but private claim rejects it',req(replayBody),403,'verification_expired',1,0);
  await check('40 Unicode characters',req({...good,nickname:'😀'.repeat(40)}),200,null,1,1);
  for(const [code,status,label] of [['23505',409,'duplicate_submission'],['P0429',429,'rate_limited'],['22023',400,'invalid_form_data'],['OTHER',503,'service_unavailable']]){writeError={code};await check('RPC '+code,req(),status,label,1,1);}
  console.log(`PASS: ${checks} mocked Edge contract scenarios. No production CAPTCHA or content write was performed.`);
