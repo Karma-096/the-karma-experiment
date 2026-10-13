@@ -94,6 +94,15 @@ Deno.serve(async request => {
     }
     return json({code:codes.includes('timeout-or-duplicate') ? 'verification_expired' : 'security_verification_failed'},403);
   }
+  // An atomic private claim remains authoritative even if a provider erroneously
+  // accepts the same token again. No token or raw digest is logged or exposed.
+  try {
+    const {data, error} = await supabase.rpc('claim_karma_turnstile_token', {
+      p_token_hash:await rateKey(secret, 'turnstile-token:' + body.turnstile_token),
+    });
+    if (error) { console.error('Karma token claim failed', error.code); return json({code:'service_unavailable'},503); }
+    if (data !== true) return json({code:'verification_expired'},403);
+  } catch { return json({code:'service_unavailable'},503); }
   try {
     const {data, error} = await supabase.rpc('submit_karma_message', {
       p_nickname:body.nickname.trim(), p_country_code:body.country_code, p_message:body.message.trim(),
