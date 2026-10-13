@@ -1,0 +1,16 @@
+{
+  "name": "the-karma-experiment",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types tests/edge_contract.mjs && node tests/frontend_contract.mjs && node tests/crypto_verifier.mjs"
+  },
+  "dependencies": { "ethers": "6.17.0" },
+  "devDependencies": {
+    "jsdom": "30.1.2",
+    "qrcode": "1.5.4",
+    "jsqr": "1.4.0",
+    "pngjs": "7.0.0"
+  }
+}
