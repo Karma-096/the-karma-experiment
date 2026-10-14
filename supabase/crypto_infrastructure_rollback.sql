@@ -1,4 +1,4 @@
--- Manual rollback for migration 20261014043027.
+-- Manual rollback for the cryptocurrency infrastructure migrations.
 -- Run only after exporting any real observations and unlinking contribution rows.
 DO $$
 DECLARE job_id bigint;
@@ -9,6 +9,7 @@ END;
 $$;
 
 DROP FUNCTION IF EXISTS karma_internal.trigger_crypto_scan(text,boolean);
+DROP FUNCTION IF EXISTS public.get_karma_payment_options();
 DROP FUNCTION IF EXISTS public.approve_karma_crypto_attribution(uuid,text);
 DROP FUNCTION IF EXISTS public.submit_karma_crypto_attribution_claim(uuid,text,text,boolean,boolean,text,text);
 DROP FUNCTION IF EXISTS public.finish_karma_crypto_scan_run(uuid,text,jsonb,integer,integer,integer,text);

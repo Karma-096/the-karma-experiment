@@ -9,11 +9,11 @@ w.matchMedia=()=>({matches:true});w.AbortSignal=AbortSignal;
 w.fetch=async(url,options)=>{if(url.includes('/rest/v1/'))return Response.json(url.endsWith('get_karma_stats')?[{participants:0,countries:0,transfers:0}]:[]);posts.push(JSON.parse(options.body));return Response.json(postResult,{status:postStatus});};
 w.turnstile={render:(box,options)=>(widget=options,'synthetic-widget'),remove:()=>{},reset:()=>{}};
 w.localStorage.setItem('karma-lang','en');
-w.eval(source+';window.__qa={translations,messages,setData:data=>{rankingData=data;renderPublicData();}};');
+w.eval(source+';window.__qa={translations,messages,setData:data=>{rankingData=data;renderPublicData();},setPayments:data=>{paymentOptions=data;renderCryptoPreparation();}};');
 w.onKarmaTurnstileLoaded();
 const tick=async()=>{await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));};
 await tick();
-const keys=[...new Set([...Array.from(d.querySelectorAll('[data-i]'),x=>x.dataset.i),'formSuccess','formInvalid','formConsent','formCaptcha','formUnavailable','formExpired','formDuplicate','formTooLarge','formServerLimit','dataLoading','securityWaiting','securityReady','securityFailed','countryPrompt','nicknamePrompt','viewLess'])];
+const keys=[...new Set([...Array.from(d.querySelectorAll('[data-i]'),x=>x.dataset.i),'formSuccess','formInvalid','formConsent','formCaptcha','formUnavailable','formExpired','formDuplicate','formTooLarge','formServerLimit','dataLoading','securityWaiting','securityReady','securityFailed','countryPrompt','nicknamePrompt','viewLess','paymentsActive','copied','confirmationTemplate','directOnly','tokenOnly','paymentLoadError','paymentQrAlt','bannerPaymentsActive'])];
 for(const language of ['en','ru','fr','de','es','pt']){
  d.querySelector('#lang').value=language;d.querySelector('#lang').dispatchEvent(new w.Event('change'));
  assert.equal(d.documentElement.lang,language);assert.equal(widget.language,language);assert.equal(widget.action,'karma_wall');assert.equal(widget.size,'compact');
@@ -38,6 +38,12 @@ widget.callback('synthetic-token');postResult={code:'verification_expired'};post
 widget.callback('synthetic-token');postResult={code:'request_too_large'};postStatus=413;await send();assert.equal(d.querySelector('#formResult').dataset.key,'formTooLarge');
 widget.callback('synthetic-token');postResult={code:'rate_limited'};postStatus=429;await send();assert.equal(d.querySelector('#formResult').dataset.key,'formServerLimit');
 for(const value of ['usdt-tron','btc-bitcoin','eth-ethereum','usdc-base','bnb-bsc']){d.querySelector('#cryptoAsset').value=value;d.querySelector('#cryptoAsset').dispatchEvent(new w.Event('change'));assert.ok(d.querySelector('#cryptoNetwork').textContent);}
-assert.equal(d.querySelector('#address'),null);assert.equal(d.querySelector('#walletLive'),null);assert.ok(!html.includes('TMaCiw2')&&!html.includes('0x098D7BC'),'Public preparation page must not contain a receiving address');
+assert.ok(d.querySelector('#paymentLive').classList.contains('hidden'));assert.equal(d.querySelector('#cryptoAddress').textContent,'');
+assert.ok(!html.includes('TMaCiw2')&&!html.includes('0x098D7BC'),'Public source must not contain an owner receiving address');
+const syntheticAddress='T'+'1'.repeat(33);
+w.__qa.setPayments([{asset_id:'usdt-tron',asset:'USDT',network:'tron',chain_id:null,kind:'tron-token',decimals:6,contract_address:'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',recipient_address:syntheticAddress,minimum_confirmations:20,internal_transfers_supported:false,qr_data_url:'data:image/png;base64,'+'A'.repeat(120)}]);
+assert.ok(!d.querySelector('#paymentLive').classList.contains('hidden'));assert.equal(d.querySelector('#cryptoAddress').textContent,syntheticAddress);assert.equal(d.querySelector('#cryptoAsset').options.length,1);
+w.__qa.setPayments([{asset_id:'usdc-base',kind:'evm-token',chain_id:8453,contract_address:'0x0000000000000000000000000000000000000000',recipient_address:'0x'+'1'.repeat(40),minimum_confirmations:20,qr_data_url:'data:image/png;base64,'+'A'.repeat(120)}]);
+assert.ok(d.querySelector('#paymentLive').classList.contains('hidden'),'Wrong token contract must fail closed');
 dom.window.close();
-console.log(`PASS: six languages, ${keys.length} required labels per language, safe text rendering, top-10/full lists, submission errors and disabled payments (local DOM tests).`);
+console.log(`PASS: six languages, ${keys.length} required labels per language, safe text rendering, top-10/full lists, submission errors, fail-closed payment UI and contract validation (local DOM tests).`);
