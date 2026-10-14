@@ -14,15 +14,43 @@ DECLARE
   test_hash text := repeat('a',64);
   payload jsonb;
   attribution_id uuid;
+  payment_option_count bigint;
 BEGIN
   IF (SELECT scanner_enabled OR payments_enabled FROM karma_internal.crypto_settings WHERE singleton) THEN
     RAISE EXCEPTION 'Payment safety flags must remain disabled';
   END IF;
+  SELECT count(*) INTO payment_option_count FROM public.get_karma_payment_options();
+  IF payment_option_count <> 0 THEN RAISE EXCEPTION 'Disabled launch exposed payment options'; END IF;
+  UPDATE karma_internal.crypto_assets
+     SET qr_data_url='data:image/png;base64,' || repeat('A',120)
+   WHERE asset_id='btc-bitcoin';
+  UPDATE karma_internal.crypto_settings
+     SET scanner_enabled=true,
+         payments_enabled=true,
+         legal_review_status='approved',
+         wallet_addresses_verified_at=clock_timestamp(),
+         public_launch_approved_at=clock_timestamp()
+   WHERE singleton=true;
+  SELECT count(*) INTO payment_option_count
+    FROM public.get_karma_payment_options()
+   WHERE asset_id='btc-bitcoin';
+  IF payment_option_count <> 1 THEN RAISE EXCEPTION 'Enabled launch did not expose the configured option'; END IF;
+  UPDATE karma_internal.crypto_settings
+     SET scanner_enabled=false,
+         payments_enabled=false,
+         legal_review_status='pending',
+         wallet_addresses_verified_at=NULL,
+         public_launch_approved_at=NULL
+   WHERE singleton=true;
+  UPDATE karma_internal.crypto_assets SET qr_data_url=NULL WHERE asset_id='btc-bitcoin';
   IF has_schema_privilege('anon','karma_internal','USAGE')
      OR has_table_privilege('anon','karma_internal.crypto_observations','SELECT')
      OR has_table_privilege('authenticated','karma_internal.crypto_observations','SELECT')
      OR has_function_privilege('anon','public.record_karma_crypto_observation(uuid,jsonb)','EXECUTE') THEN
     RAISE EXCEPTION 'Public cryptocurrency privileges detected';
+  END IF;
+  IF NOT has_function_privilege('anon','public.get_karma_payment_options()','EXECUTE') THEN
+    RAISE EXCEPTION 'Public payment options RPC is unavailable';
   END IF;
   SELECT count(*) INTO contribution_count FROM public.karma_contributions;
   SELECT count(*) INTO participant_count FROM public.karma_participants;
@@ -77,5 +105,5 @@ ROLLBACK;
 
 SELECT jsonb_build_object(
   'result','PASS',
-  'covered',jsonb_build_array('disabled guards','RLS/grants','one-time token replay','idempotency','no public contribution','consent gate','approval gate','reorg revocation','rollback')
+  'covered',jsonb_build_array('disabled public payment gate','enabled public payment gate','RLS/grants','one-time token replay','idempotency','no public contribution','consent gate','approval gate','reorg revocation','rollback')
 ) AS crypto_database_contract;
