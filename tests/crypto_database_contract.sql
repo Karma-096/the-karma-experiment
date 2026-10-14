@@ -25,14 +25,22 @@ BEGIN
      SET qr_data_url='data:image/png;base64,' || repeat('A',120)
    WHERE asset_id='btc-bitcoin';
   UPDATE karma_internal.crypto_settings
-     SET scanner_enabled=true,payments_enabled=true
+     SET scanner_enabled=true,
+         payments_enabled=true,
+         legal_review_status='approved',
+         wallet_addresses_verified_at=clock_timestamp(),
+         public_launch_approved_at=clock_timestamp()
    WHERE singleton=true;
   SELECT count(*) INTO payment_option_count
     FROM public.get_karma_payment_options()
    WHERE asset_id='btc-bitcoin';
   IF payment_option_count <> 1 THEN RAISE EXCEPTION 'Enabled launch did not expose the configured option'; END IF;
   UPDATE karma_internal.crypto_settings
-     SET scanner_enabled=false,payments_enabled=false
+     SET scanner_enabled=false,
+         payments_enabled=false,
+         legal_review_status='pending',
+         wallet_addresses_verified_at=NULL,
+         public_launch_approved_at=NULL
    WHERE singleton=true;
   UPDATE karma_internal.crypto_assets SET qr_data_url=NULL WHERE asset_id='btc-bitcoin';
   IF has_schema_privilege('anon','karma_internal','USAGE')
