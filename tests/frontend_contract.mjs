@@ -5,14 +5,17 @@ const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
 const source=html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const dom=new JSDOM(html,{url:'https://karma-096.github.io/the-karma-experiment/',runScripts:'outside-only',pretendToBeVisual:true});
 const w=dom.window,d=w.document;let widget,postResult={success:true},postStatus=200;const posts=[];
-w.matchMedia=()=>({matches:true});w.AbortSignal=AbortSignal;
+w.matchMedia=()=>({matches:true});
+// Browsers can support AbortController without the newer AbortSignal.timeout.
+w.AbortSignal = {};
 w.fetch=async(url,options)=>{if(url.includes('/rest/v1/'))return Response.json(url.endsWith('get_karma_stats')?[{participants:0,countries:0,transfers:0}]:[]);posts.push(JSON.parse(options.body));return Response.json(postResult,{status:postStatus});};
 w.turnstile={render:(box,options)=>(widget=options,'synthetic-widget'),remove:()=>{},reset:()=>{}};
 w.localStorage.setItem('karma-lang','en');
-w.eval(source+';window.__qa={translations,messages,setData:data=>{rankingData=data;renderPublicData();},setPayments:data=>{paymentOptions=data;renderCryptoPreparation();}};');
+w.eval(source+';window.__qa={translations,messages,karmaRPC,setData:data=>{rankingData=data;renderPublicData();},setPayments:data=>{paymentOptions=data;renderCryptoPreparation();}};');
 w.onKarmaTurnstileLoaded();
 const tick=async()=>{await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));};
 await tick();
+assert.equal(d.querySelector('#participants').textContent,'0','Public data must load without AbortSignal.timeout');
 const keys=[...new Set([...Array.from(d.querySelectorAll('[data-i]'),x=>x.dataset.i),'formSuccess','formInvalid','formConsent','formCaptcha','formUnavailable','formExpired','formDuplicate','formTooLarge','formServerLimit','dataLoading','securityWaiting','securityReady','securityFailed','countryPrompt','nicknamePrompt','viewLess','paymentsActive','copied','confirmationTemplate','directOnly','tokenOnly','paymentLoadError','paymentQrAlt','bannerPaymentsActive'])];
 for(const language of ['en','ru','fr','de','es','pt']){
  d.querySelector('#lang').value=language;d.querySelector('#lang').dispatchEvent(new w.Event('change'));
@@ -45,5 +48,21 @@ w.__qa.setPayments([{asset_id:'usdt-tron',asset:'USDT',network:'tron',chain_id:n
 assert.ok(!d.querySelector('#paymentLive').classList.contains('hidden'));assert.equal(d.querySelector('#cryptoAddress').textContent,syntheticAddress);assert.equal(d.querySelector('#cryptoAsset').options.length,1);
 w.__qa.setPayments([{asset_id:'usdc-base',kind:'evm-token',chain_id:8453,contract_address:'0x0000000000000000000000000000000000000000',recipient_address:'0x'+'1'.repeat(40),minimum_confirmations:20,qr_data_url:'data:image/png;base64,'+'A'.repeat(120)}]);
 assert.ok(d.querySelector('#paymentLive').classList.contains('hidden'),'Wrong token contract must fail closed');
+// Exercise request cancellation and timer cleanup without waiting 12 seconds.
+const originalTimer=w.setTimeout, originalClear=w.clearTimeout, originalFetch=w.fetch;
+let expire, cleared=0;
+w.setTimeout=(callback,ms)=>{assert.equal(ms,12000);expire=callback;return 42;};
+w.clearTimeout=id=>{assert.equal(id,42);cleared++;};
+await w.__qa.karmaRPC('get_karma_messages');
+assert.equal(cleared,1,'Completed requests must release the timer');
+w.fetch=async(url,options)=>new Promise((resolve,reject)=>{
+ options.signal.addEventListener('abort',()=>reject(new Error('request aborted')),{once:true});
+});
+const stalled=w.__qa.karmaRPC('get_karma_messages');
+const rejected=assert.rejects(stalled,/request aborted/);
+expire();
+await rejected;
+assert.equal(cleared,2,'Aborted requests must release the timer');
+w.setTimeout=originalTimer;w.clearTimeout=originalClear;w.fetch=originalFetch;
 dom.window.close();
 console.log(`PASS: six languages, ${keys.length} required labels per language, safe text rendering, top-10/full lists, submission errors, fail-closed payment UI and contract validation (local DOM tests).`);

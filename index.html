@@ -729,18 +729,24 @@ function renderPublicData() {
   $('wallEmpty').classList.toggle('hidden', !!wall?.length);
 }
 async function karmaRPC(name) {
-  const response = await fetch(KARMA_SUPABASE_URL + '/rest/v1/rpc/' + name, {
-    method: 'POST',
-    headers: { apikey: KARMA_PUBLISHABLE_KEY, 'Content-Type': 'application/json' },
-    body: '{}',
-    cache: 'no-store',
-    credentials: 'omit',
-    signal: AbortSignal.timeout(12000)
-  });
-  if (!response.ok) throw new Error(name + ' HTTP ' + response.status);
-  const rows = await response.json();
-  if (!Array.isArray(rows)) throw new Error(name + ' returned unexpected data');
-  return rows;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  try {
+    const response = await fetch(KARMA_SUPABASE_URL + '/rest/v1/rpc/' + name, {
+      method: 'POST',
+      headers: { apikey: KARMA_PUBLISHABLE_KEY, 'Content-Type': 'application/json' },
+      body: '{}',
+      cache: 'no-store',
+      credentials: 'omit',
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(name + ' HTTP ' + response.status);
+    const rows = await response.json();
+    if (!Array.isArray(rows)) throw new Error(name + ' returned unexpected data');
+    return rows;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 async function refreshKarma() {
   connectionState = 'connecting';
