@@ -154,34 +154,97 @@ export async function verifyWithTwoProviders(assetId,hash,{providers,recipient,f
   const normalized=assertIndependentProviders(providers);
   const results=await Promise.all(normalized.map(provider=>verifyOnProvider(assetId,hash,{endpoint:provider.url,recipient,fetcher,tronGenesis,retry})));
   if(results.some(result=>!result.confirmed))return {confirmed:false,reason:'not_confirmed_by_both_providers'};
-  const stable=result=>JSON.stringify([result.asset,result.network,result.transaction_hash,result.amount_atomic,result.block_height,result.block_hash.toLowerCase()]);
+  const stable=result=>JSON.stringify([result.asset,result.network,result.transaction_hash,result.amount_atomic,result.block_height,result.block_hash.toLowerCase(),result.observed_at]);
   if(stable(results[0])!==stable(results[1]))throw new Error('Independent provider evidence disagrees');
   return {...results[0],confirmations:Math.min(...results.map(r=>r.confirmations)),provider_evidence:normalized.map((provider,index)=>({operator:provider.operator,block_hash:results[index].block_hash,confirmations:results[index].confirmations})),verified:false,publication_eligible:false,requires:['receipt-time USD valuation','voluntary participant attribution with verified proof','owner launch approval']};
 }
 
-export async function discoverCandidates(assetId,{provider,recipient,fromBlock=null,toBlock=null,fetcher=fetch,retry={},maxBlocks=120}){
-  const a=ASSETS[assetId];if(!a)throw new Error('Unsupported asset');const p=providerDefinition(provider);validateRecipient(assetId,recipient);
+// A batch describes scanned coverage, even when it contains no transfers.
+// Never infer coverage from the highest transaction found.
+export async function discoverBatch(assetId,{provider,recipient,fromBlock=null,toBlock=null,fromTime=null,fetcher=fetch,retry={},maxBlocks=120,maxPages=20,previousHash=null}={}){
+  const a=ASSETS[assetId];if(!a)throw new Error('Unsupported asset');
+  const p=providerDefinition(provider);const target=validateRecipient(assetId,recipient);
+  if(!Number.isSafeInteger(maxBlocks)||maxBlocks<1||maxBlocks>2048||!Number.isSafeInteger(maxPages)||maxPages<1||maxPages>100)throw new Error('Invalid discovery limits');
+  const found=new Set();
   if(a.kind==='bitcoin'){
-    const txs=await transport(p.url,'/address/'+encodeURIComponent(recipient)+'/txs',null,fetcher,retry);if(!Array.isArray(txs))throw new Error('Invalid Bitcoin discovery response');
-    return [...new Set(txs.filter(tx=>tx?.txid&&tx.vout?.some(output=>output.scriptpubkey_address===recipient)).map(tx=>tx.txid.toLowerCase()))];
+    let path='/address/'+encodeURIComponent(recipient)+'/txs';const cursors=new Set();
+    for(let page=0;page<maxPages;page++){
+      const txs=await transport(p.url,path,null,fetcher,retry);if(!Array.isArray(txs))throw new Error('Invalid Bitcoin discovery response');
+      for(const tx of txs)if(tx?.txid&&tx.vout?.some(o=>o.scriptpubkey_address===recipient)&&!tx.vin?.some(i=>i.prevout?.scriptpubkey_address===recipient)){
+        if(!/^[a-f0-9]{64}$/i.test(tx.txid))throw new Error('Invalid discovery transaction');found.add(tx.txid.toLowerCase());
+      }
+      const confirmed=txs.filter(tx=>tx.status?.confirmed===true);
+      if(confirmed.length<25)return {hashes:[...found],complete:true};
+      const cursor=confirmed.at(-1).txid;
+      if(!/^[a-f0-9]{64}$/i.test(cursor)||cursors.has(cursor))throw new Error('Invalid Bitcoin pagination cursor');
+      cursors.add(cursor);path='/address/'+encodeURIComponent(recipient)+'/txs/chain/'+cursor;
+    }
+    throw new Error('Bitcoin history exceeds page budget; checkpoint not advanced');
   }
   if(a.kind==='tron-token'){
-    const path=`/v1/accounts/${encodeURIComponent(recipient)}/transactions/trc20?only_confirmed=true&limit=100&contract_address=${encodeURIComponent(a.contract)}`;
-    const result=await transport(p.url,path,null,fetcher,retry);if(!Array.isArray(result.data))throw new Error('Invalid Tron discovery response');
-    return [...new Set(result.data.filter(tx=>tx?.to===recipient&&tx?.token_info?.address===a.contract&&tx.transaction_id).map(tx=>tx.transaction_id.toLowerCase()))];
+    const basePath=`/v1/accounts/${encodeURIComponent(recipient)}/transactions/trc20?only_confirmed=true&only_to=true&limit=100&contract_address=${encodeURIComponent(a.contract)}`;
+    let path=basePath;const cursors=new Set();
+    for(let page=0;page<maxPages;page++){
+      const result=await transport(p.url,path,null,fetcher,retry);if(!Array.isArray(result.data)||result.success===false)throw new Error('Invalid Tron discovery response');
+      for(const tx of result.data)if(tx?.to===recipient&&tx?.from!==recipient&&tx?.token_info?.address===a.contract&&tx.transaction_id){
+        if(!/^[a-f0-9]{64}$/i.test(tx.transaction_id))throw new Error('Invalid discovery transaction');found.add(tx.transaction_id.toLowerCase());
+      }
+      const cursor=result.meta?.fingerprint;
+      if(!cursor){if(result.data.length===100)throw new Error('Tron pagination cursor missing');return {hashes:[...found],complete:true};}
+      if(typeof cursor!=='string'||cursor.length>4096||cursors.has(cursor))throw new Error('Invalid Tron pagination cursor');
+      cursors.add(cursor);path=basePath+'&fingerprint='+encodeURIComponent(cursor);
+    }
+    throw new Error('Tron history exceeds page budget; checkpoint not advanced');
   }
-  const call=rpc(p.url,fetcher,retry);if(Number(integerHex(await call('eth_chainId')))!==a.chainId)throw new Error('Wrong chain ID');
-  const finalized=await call('eth_getBlockByNumber',['finalized',false]);if(!finalized)throw new Error('Provider must support finalized blocks');
-  const safeTo=toBlock===null?Number(integerHex(finalized.number)):Math.min(toBlock,Number(integerHex(finalized.number)));const start=fromBlock===null?Math.max(0,safeTo-24):fromBlock;
-  if(!Number.isSafeInteger(start)||!Number.isSafeInteger(safeTo)||safeTo<start||safeTo-start+1>maxBlocks)throw new Error('Unsafe EVM scan range');
+  const call=rpc(p.url,fetcher,retry);
+  if(Number(integerHex(await call('eth_chainId')))!==a.chainId)throw new Error('Wrong chain ID');
+  const finalized=await call('eth_getBlockByNumber',['finalized',false]);if(!finalized||!HEX32.test(finalized.hash))throw new Error('Provider must support finalized blocks');
+  const tip=Number(integerHex(finalized.number));
+  if(!Number.isSafeInteger(tip)||tip<0)throw new Error('Invalid finalized height');
+  const safeTip=toBlock===null?tip:Math.min(toBlock,tip);
+  if(!Number.isSafeInteger(safeTip)||safeTip<0)throw new Error('Unsafe EVM scan range');
+  let start=fromBlock;
+  if(start===null){
+    const timestamp=Math.floor(Date.parse(fromTime)/1000);
+    if(!Number.isSafeInteger(timestamp)||timestamp<=0)throw new Error('Explicit historical scan start required');
+    // First block at or after the configured start; no moving last-25-block window.
+    let lo=0,hi=safeTip;
+    while(lo<hi){const mid=Math.floor((lo+hi)/2);const b=await call('eth_getBlockByNumber',['0x'+mid.toString(16),false]);
+      if(!b||Number(integerHex(b.number))!==mid)throw new Error('Invalid historical block');
+      if(Number(integerHex(b.timestamp))<timestamp)lo=mid+1;else hi=mid;
+    }
+    start=lo;
+  }
+  if(!Number.isSafeInteger(start)||start<0||start>safeTip+1)throw new Error('Unsafe EVM scan range');
+  if(previousHash&&start>0){const previous=await call('eth_getBlockByNumber',['0x'+(start-1).toString(16),false]);
+    if(previous?.hash?.toLowerCase()!==previousHash.toLowerCase())throw new Error('Checkpoint block changed; historical reconciliation required');}
+  if(start>safeTip)return {hashes:[],complete:true,fromBlock:start,toBlock:null,finalizedHeight:safeTip,lag:0};
+  const end=Math.min(safeTip,start+maxBlocks-1);
+  const endBlock=await call('eth_getBlockByNumber',['0x'+end.toString(16),false]);
+  if(!endBlock||!HEX32.test(endBlock.hash)||Number(integerHex(endBlock.number))!==end)throw new Error('Invalid batch end block');
   if(a.kind==='evm-token'){
-    const target='0x'+'0'.repeat(24)+validateRecipient(assetId,recipient).slice(2);const logs=await call('eth_getLogs',[{address:a.contract,fromBlock:'0x'+start.toString(16),toBlock:'0x'+safeTo.toString(16),topics:[TRANSFER,null,target]}]);
-    if(!Array.isArray(logs))throw new Error('Invalid token discovery response');return [...new Set(logs.filter(log=>!log.removed&&HEX32.test(log.transactionHash)).map(log=>log.transactionHash.toLowerCase()))];
+    const topic='0x'+'0'.repeat(24)+target.slice(2);
+    const logs=await call('eth_getLogs',[{address:a.contract,fromBlock:'0x'+start.toString(16),toBlock:'0x'+end.toString(16),topics:[TRANSFER,null,topic]}]);
+    if(!Array.isArray(logs))throw new Error('Invalid token discovery response');
+    for(const log of logs){if(log.removed||!HEX32.test(log.transactionHash)||log.address?.toLowerCase()!==a.contract.toLowerCase()||log.topics?.length!==3||log.topics[0]?.toLowerCase()!==TRANSFER||topicAddress(log.topics[2])!==target)throw new Error('Invalid token discovery log');if(topicAddress(log.topics[1])!==target)found.add(log.transactionHash.toLowerCase());}
+  }else{
+    // Bounded concurrency, rather than an unbounded burst of RPC requests.
+    for(let base=start;base<=end;base+=6){
+      await Promise.all(Array.from({length:Math.min(6,end-base+1)},async(_,offset)=>{
+        const height=base+offset;const block=await call('eth_getBlockByNumber',['0x'+height.toString(16),true]);
+        if(!Array.isArray(block?.transactions)||Number(integerHex(block.number))!==height||!HEX32.test(block.hash))throw new Error('Invalid block transaction list');
+        for(const tx of block.transactions)if(tx.to?.toLowerCase()===target&&tx.from?.toLowerCase()!==target&&integerHex(tx.value)>0n){
+          if(!HEX32.test(tx.hash))throw new Error('Invalid discovery transaction');found.add(tx.hash.toLowerCase());
+        }
+      }));
+    }
   }
-  const target=validateRecipient(assetId,recipient);const found=[];
-  for(let height=start;height<=safeTo;height++){const block=await call('eth_getBlockByNumber',['0x'+height.toString(16),true]);if(!Array.isArray(block?.transactions))throw new Error('Invalid block transaction list');for(const tx of block.transactions)if(tx.to?.toLowerCase()===target&&tx.from?.toLowerCase()!==target&&integerHex(tx.value)>0n)found.push(tx.hash.toLowerCase());}
-  return [...new Set(found)];
+  const check=await call('eth_getBlockByNumber',['0x'+end.toString(16),false]);
+  if(check?.hash!==endBlock.hash)throw new Error('Batch changed during discovery');
+  return {hashes:[...found],fromBlock:start,toBlock:end,blockHash:endBlock.hash,finalizedHeight:safeTip,lag:safeTip-end,complete:end===safeTip};
 }
+
+export async function discoverCandidates(assetId,options){return (await discoverBatch(assetId,options)).hashes;}
 
 async function historicalPrice(provider,asset,at,fetcher,retry){
   const p=providerDefinition(provider);const timestamp=Math.floor(new Date(at).getTime()/1000);if(!Number.isSafeInteger(timestamp)||timestamp<=0)throw new Error('Invalid valuation time');
@@ -194,7 +257,7 @@ async function historicalPrice(provider,asset,at,fetcher,retry){
   }
   if(p.kind==='defillama'){
     const key=`coingecko:${PRICE_IDS[asset]}`;const data=await transport(p.url,`/prices/historical/${timestamp}/${encodeURIComponent(key)}`,null,fetcher,retry);const row=data?.coins?.[key];
-    if(!row||!Number.isFinite(Number(row.price))||Number(row.price)<=0)throw new Error('Price unavailable');return {operator:p.operator,price:Number(row.price),timestamp:new Date(Number(row.timestamp||timestamp)*1000).toISOString()};
+    if(!row||!Number.isFinite(Number(row.price))||Number(row.price)<=0)throw new Error('Price unavailable');return {operator:p.operator,price:Number(row.price),timestamp:new Date(Number(row.timestamp)*1000).toISOString()};
   }
   if(p.kind==='coinpaprika'){
     const start=timestamp-600,end=timestamp+600;const rows=await transport(p.url,`/tickers/${PAPRIKA_IDS[asset]}/historical?start=${start}&end=${end}&interval=5m&quote=usd`,null,fetcher,retry);
@@ -213,7 +276,7 @@ async function historicalPrice(provider,asset,at,fetcher,retry){
   }
   if(p.kind==='kraken'){
     const pair=KRAKEN_PAIRS[asset];const data=await transport(p.url,`/public/OHLC?pair=${pair}&interval=1&since=${timestamp-120}`,null,fetcher,retry);
-    if(!data||!Array.isArray(data.error)||data.error.length)throw new Error('Price unavailable');const key=Object.keys(data.result||{}).find(item=>item!=='last');const rows=key?data.result[key]:null;
+    if(!data||!Array.isArray(data.error)||data.error.length)throw new Error('Price unavailable');const key=Object.keys(data.result||{}).find(item=>item!=='last');const rows=key&&Array.isArray(data.result[key])?data.result[key].slice(0,-1):null; // Kraken's final candle is still open.
     if(!Array.isArray(rows)||!rows.length)throw new Error('Price unavailable');const row=rows.reduce((best,item)=>Math.abs(Number(item[0])-timestamp)<Math.abs(Number(best[0])-timestamp)?item:best);const price=Number(row[4]),published=Number(row[0]);
     if(!Number.isFinite(price)||price<=0||!Number.isSafeInteger(published))throw new Error('Price unavailable');return {operator:p.operator,price,timestamp:new Date(published*1000).toISOString()};
   }
@@ -227,11 +290,14 @@ export async function probeHistoricalPrice(provider,asset,at,{fetcher=fetch,retr
 function scaledDecimal(number,scale=12){if(!Number.isFinite(number)||number<=0)throw new Error('Invalid price');return BigInt(number.toFixed(scale).replace('.',''));}
 function formatScaled(value,scale){const raw=value.toString().padStart(scale+1,'0');return raw.slice(0,-scale)+'.'+raw.slice(-scale).replace(/0+$/,'').padEnd(2,'0');}
 
-export async function valueWithTwoProviders(assetId,amountAtomic,observedAt,{providers=DEFAULT_PRICE_PROVIDERS,fetcher=fetch,retry={},maxDeviation=0.05}={}){
+export async function valueWithTwoProviders(assetId,amountAtomic,observedAt,{providers=DEFAULT_PRICE_PROVIDERS,fetcher=fetch,retry={},maxDeviation=0.05,maxTimeDeviationSeconds=600}={}){
   const a=ASSETS[assetId];if(!a)throw new Error('Unsupported asset');const normalized=assertIndependentProviders(providers);const amount=BigInt(amountAtomic);if(amount<=0n)throw new Error('Invalid amount');
   const prices=await Promise.all(normalized.map(provider=>historicalPrice(provider,a.asset,observedAt,fetcher,retry)));
+  const observed=Date.parse(observedAt);
+  if(!Number.isFinite(observed)||!Number.isFinite(maxTimeDeviationSeconds)||maxTimeDeviationSeconds<0||maxTimeDeviationSeconds>600||prices.some(item=>!Number.isFinite(Date.parse(item.timestamp))||Math.abs(Date.parse(item.timestamp)-observed)>maxTimeDeviationSeconds*1000))throw new Error('Historical price timestamp outside allowed window');
   if(prices.some(item=>!Number.isFinite(item.price)||item.price<=0))throw new Error('Price unavailable');const low=Math.min(...prices.map(x=>x.price)),high=Math.max(...prices.map(x=>x.price));if((high-low)/low>maxDeviation)throw new Error('Independent price evidence disagrees');
   const price=(prices[0].price+prices[1].price)/2;const priceScaled=scaledDecimal(price,12);const usdScaled=amount*priceScaled*100000000n/(10n**BigInt(a.decimals)*1000000000000n);
+  if(usdScaled<=0n)throw new Error('USD amount below accounting precision');
   return {status:'valued',asset:a.asset,amount_atomic:amount.toString(),amount_decimal:atomicToDecimal(amount,a.decimals),price_usd:formatScaled(priceScaled,12),amount_usd:formatScaled(usdScaled,8),valued_at:new Date(observedAt).toISOString(),sources:prices.map(item=>({operator:item.operator,price_usd:String(item.price),timestamp:item.timestamp}))};
 }
 
@@ -246,7 +312,7 @@ export async function healthCheckAsset(assetId,{providers,recipient,fetcher=fetc
     try{
       if(a.kind==='bitcoin'){const genesis=await transport(provider.url,'/block-height/0',null,fetcher,retry);if(genesis.trim()!=='000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f')throw new Error('Wrong Bitcoin network');}
       else if(a.kind==='tron-token'){const genesis=await transport(provider.url,'/walletsolidity/getblockbynum',{num:0},fetcher,retry);if(genesis.blockID!==a.genesis)throw new Error('Wrong Tron network');}
-      else {const call=rpc(provider.url,fetcher,retry);if(Number(integerHex(await call('eth_chainId')))!==a.chainId)throw new Error('Wrong chain ID');if(a.kind==='evm-token'){const code=await call('eth_getCode',[a.contract,'latest']);if(typeof code!=='string'||code==='0x')throw new Error('Token contract missing');}}
+      else {const call=rpc(provider.url,fetcher,retry);if(Number(integerHex(await call('eth_chainId')))!==a.chainId)throw new Error('Wrong chain ID');for(const tag of ['latest','finalized']){const block=await call('eth_getBlockByNumber',[tag,false]);if(!block||!HEX32.test(block.hash)||integerHex(block.number)<0n)throw new Error('Block/finality method unavailable');}await call('eth_getTransactionReceipt',['0x'+'0'.repeat(64)]);if(a.kind==='evm-token'){const code=await call('eth_getCode',[a.contract,'latest']);if(typeof code!=='string'||code==='0x')throw new Error('Token contract missing');}}
       checks.push({operator:provider.operator,ok:true});
     }catch(error){checks.push({operator:provider.operator,ok:false,error:safeError(error)});}
   }

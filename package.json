@@ -4,13 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --experimental-strip-types tests/edge_contract.mjs && node tests/frontend_contract.mjs && node tests/crypto_verifier.mjs && node tests/crypto_scan_engine.mjs"
+    "test": "node --experimental-strip-types tests/edge_contract.mjs && node tests/frontend_contract.mjs && node tests/crypto_verifier.mjs && node tests/crypto_scan_engine.mjs && node tests/crypto_integrity.mjs && node tests/crypto_sql_integrity.mjs"
   },
-  "dependencies": { "ethers": "6.17.0" },
+  "dependencies": {
+    "ethers": "6.17.0"
+  },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.13",
     "jsdom": "30.1.2",
-    "qrcode": "1.5.4",
     "jsqr": "1.4.0",
-    "pngjs": "7.0.0"
+    "pngjs": "7.0.0",
+    "qrcode": "1.5.4"
   }
 }

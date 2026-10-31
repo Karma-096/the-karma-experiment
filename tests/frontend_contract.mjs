@@ -11,7 +11,7 @@ w.AbortSignal = {};
 w.fetch=async(url,options)=>{if(url.includes('/rest/v1/'))return Response.json(url.endsWith('get_karma_stats')?[{participants:0,countries:0,transfers:0}]:[]);posts.push(JSON.parse(options.body));return Response.json(postResult,{status:postStatus});};
 w.turnstile={render:(box,options)=>(widget=options,'synthetic-widget'),remove:()=>{},reset:()=>{}};
 w.localStorage.setItem('karma-lang','en');
-w.eval(source+';window.__qa={translations,messages,karmaRPC,setData:data=>{rankingData=data;renderPublicData();},setPayments:data=>{paymentOptions=data;renderCryptoPreparation();}};');
+w.eval(source+';window.__qa={translations,messages,karmaRPC,refreshPaymentOptions,setData:data=>{rankingData=data;renderPublicData();},setPayments:data=>{paymentOptions=data;renderCryptoPreparation();}};');
 w.onKarmaTurnstileLoaded();
 const tick=async()=>{await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));};
 await tick();
@@ -48,6 +48,19 @@ w.__qa.setPayments([{asset_id:'usdt-tron',asset:'USDT',network:'tron',chain_id:n
 assert.ok(!d.querySelector('#paymentLive').classList.contains('hidden'));assert.equal(d.querySelector('#cryptoAddress').textContent,syntheticAddress);assert.equal(d.querySelector('#cryptoAsset').options.length,1);
 w.__qa.setPayments([{asset_id:'usdc-base',kind:'evm-token',chain_id:8453,contract_address:'0x0000000000000000000000000000000000000000',recipient_address:'0x'+'1'.repeat(40),minimum_confirmations:20,qr_data_url:'data:image/png;base64,'+'A'.repeat(120)}]);
 assert.ok(d.querySelector('#paymentLive').classList.contains('hidden'),'Wrong token contract must fail closed');
+// An open tab must clear cached addresses after shutdown or a failed refresh.
+const savedFetch=w.fetch;
+w.fetch=async()=>{throw new Error('offline');};
+await assert.rejects(w.__qa.refreshPaymentOptions(),/offline/);
+assert.equal(d.querySelector('#cryptoAddress').textContent,'');
+assert.equal(d.querySelector('#cryptoQr').hasAttribute('src'),false);
+const pendingResponses=[];
+w.fetch=async()=>new Promise(resolve=>pendingResponses.push(resolve));
+const older=w.__qa.refreshPaymentOptions(),newer=w.__qa.refreshPaymentOptions();
+pendingResponses[1](Response.json([]));await newer;
+pendingResponses[0](Response.json([{asset_id:'usdt-tron',kind:'tron-token',chain_id:null,contract_address:'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',recipient_address:syntheticAddress,minimum_confirmations:20,qr_data_url:'data:image/png;base64,'+'A'.repeat(120)}]));await older;
+assert.equal(d.querySelector('#cryptoAddress').textContent,'','Old response must not restore disabled payments');
+w.fetch=savedFetch;
 // Exercise request cancellation and timer cleanup without waiting 12 seconds.
 const originalTimer=w.setTimeout, originalClear=w.clearTimeout, originalFetch=w.fetch;
 let expire, cleared=0;
