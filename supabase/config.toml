@@ -1,2 +1,6 @@
 [functions.submit-karma-message]
 verify_jwt = false
+
+# The scanner authenticates a single-use database token, not a caller JWT.
+[functions.scan-crypto-contributions]
+verify_jwt = false

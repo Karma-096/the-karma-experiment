@@ -604,6 +604,7 @@ let expandedLeaders = false;
 let expandedCountries = false;
 let rankingData = { country: undefined, leaders: undefined, messages: undefined, stats: undefined };
 let paymentOptions;
+let paymentRequestVersion = 0;
 const paymentPolicies = {
   'usdt-tron': { label: 'USDT / Tron (TRC-20)', network: 'Tron Mainnet (TRC-20)', kind: 'tron-token', contract: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t', address: /^T[1-9A-HJ-NP-Za-km-z]{33}$/ },
   'btc-bitcoin': { label: 'BTC / Bitcoin', network: 'Bitcoin Mainnet', kind: 'bitcoin', contract: null, address: /^bc1[a-z0-9]{25,62}$/ },
@@ -748,6 +749,17 @@ async function karmaRPC(name) {
     clearTimeout(timeout);
   }
 }
+async function refreshPaymentOptions() {
+  const version = ++paymentRequestVersion;
+  try {
+    const rows = await karmaRPC('get_karma_payment_options');
+    if (version === paymentRequestVersion) { paymentOptions = rows; renderCryptoPreparation(); }
+    return rows;
+  } catch (error) {
+    if (version === paymentRequestVersion) { paymentOptions = null; renderCryptoPreparation(); }
+    throw error;
+  }
+}
 async function refreshKarma() {
   connectionState = 'connecting';
   $('connectionStatus').textContent = messages[locale][connectionState];
@@ -756,11 +768,10 @@ async function refreshKarma() {
     karmaRPC('get_karma_leader_ranking'),
     karmaRPC('get_karma_messages'),
     karmaRPC('get_karma_stats'),
-    karmaRPC('get_karma_payment_options')
+    refreshPaymentOptions()
   ]);
   for (const [index, key] of ['country', 'leaders', 'messages', 'stats'].entries())
     rankingData[key] = results[index].status === 'fulfilled' ? (key === 'stats' ? results[index].value[0] : results[index].value) : null;
-  paymentOptions = results[4].status === 'fulfilled' ? results[4].value : null;
   renderPublicData();
   renderCryptoPreparation();
   connectionState = results.every(result => result.status === 'fulfilled')
@@ -967,6 +978,7 @@ function renderCryptoPreparation() {
 }
 $('cryptoAsset').onchange = renderCryptoPreparation;
 $('copyCryptoAddress').onclick = async () => {
+  try { await refreshPaymentOptions(); } catch { return; }
   const address = $('cryptoAddress').textContent;
   if (!address) return;
   try {
@@ -980,6 +992,14 @@ $('copyCryptoAddress').onclick = async () => {
     selection.addRange(range);
   }
 };
+// Refresh emergency shutdown state in already-open tabs; invalidate stale responses.
+setInterval(() => { if (!document.hidden) refreshPaymentOptions().catch(() => {}); }, 30000);
+document.addEventListener('visibilitychange', () => {
+  ++paymentRequestVersion;
+  paymentOptions = null;
+  renderCryptoPreparation();
+  if (!document.hidden) refreshPaymentOptions().catch(() => {});
+});
 // The server keeps payments fail-closed until the owner completes the final launch checks.
 applyLanguage();
 refreshKarma();

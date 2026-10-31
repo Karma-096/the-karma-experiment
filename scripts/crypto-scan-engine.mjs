@@ -1,6 +1,6 @@
 import {
   DEFAULT_PRICE_PROVIDERS,
-  discoverCandidates,
+  discoverBatch,
   healthCheckAsset,
   probeHistoricalPrice,
   valueWithTwoProviders,
@@ -57,8 +57,9 @@ function confirmedPayload(asset, evidence, valuation) {
   };
 }
 
-export async function runCryptoScan(claim, {rpc, fetcher=fetch, priceProviders=DEFAULT_PRICE_PROVIDERS, retry={attempts:3,baseDelayMs:250}}) {
+export async function runCryptoScan(claim, {rpc, fetcher=fetch, priceProviders=DEFAULT_PRICE_PROVIDERS, retry={attempts:3,baseDelayMs:250},maxBatches=24,assetBudgetMs=30000}) {
   if (!claim?.authorized || !claim.run_id || !Array.isArray(claim.assets)) throw new Error('Invalid scan claim');
+  if(!Number.isInteger(maxBatches)||maxBatches<1||maxBatches>32||!Number.isFinite(assetBudgetMs)||assetBudgetMs<1||assetBudgetMs>60000)throw new Error('Invalid scan budget');
   const totals = {discovered:0, verified:0, valued:0};
   const details = {mode:claim.mode, payments_enabled:Boolean(claim.payments_enabled), assets:[]};
 
@@ -97,11 +98,18 @@ export async function runCryptoScan(claim, {rpc, fetcher=fetch, priceProviders=D
         continue;
       }
 
-      const start = asset.checkpoint?.last_finalized_height == null ? null : Number(asset.checkpoint.last_finalized_height) + 1;
-      const discovered = await discoverCandidates(asset.asset_id,{provider:discovery,recipient:asset.recipient_address,fromBlock:start,fetcher,retry,maxBlocks:120});
+      let start = asset.checkpoint?.last_finalized_height == null ? null : Number(asset.checkpoint.last_finalized_height) + 1;
+      let previousHash=asset.checkpoint?.last_scanned_hash;
+      const deadline=Date.now()+assetBudgetMs;
+      for(let batchIndex=0;batchIndex<maxBatches;batchIndex++){
+      const batch = await discoverBatch(asset.asset_id,{provider:discovery,recipient:asset.recipient_address,fromBlock:start,fromTime:asset.scan_start_at,previousHash,fetcher,retry,maxBlocks:asset.kind==='evm-token'?2048:120});
+      const discovered=batch.hashes;
+      result.coverage={from:batch.fromBlock,to:batch.toBlock,finalized:batch.finalizedHeight,remaining_blocks:batch.lag};
       const known = new Map((asset.known_observations || []).map(item => [String(item.transaction_hash).toLowerCase(),item]));
-      const hashes = [...new Set([...discovered,...known.keys()])].slice(0,300);
-      result.discovered=discovered.length; totals.discovered+=discovered.length;
+      const hashes = [...new Set([...discovered,...(batchIndex===0?known.keys():[])])];
+      if(hashes.length>1000)throw new Error('Observation budget exceeded; checkpoint not advanced');
+      let unresolved=false,unresolvedBatch=false;
+      result.discovered+=discovered.length; totals.discovered+=discovered.length;
       let maxHeight = asset.checkpoint?.last_scanned_height == null ? null : Number(asset.checkpoint.last_scanned_height);
       let maxHash = asset.checkpoint?.last_scanned_hash || null;
 
@@ -111,32 +119,44 @@ export async function runCryptoScan(claim, {rpc, fetcher=fetch, priceProviders=D
         try {
           evidence = await verifyWithTwoProviders(asset.asset_id,transactionHash,{providers:verification,recipient:asset.recipient_address,fetcher,retry});
         } catch (error) {
-          if (previous?.status === 'confirmed') {
+          if (previous) {
             await rpc('record_karma_crypto_observation',{p_run_id:claim.run_id,p_payload:priorPayload(asset,previous,'needs_review','provider_verification_error')});
+            unresolved=true;
+            if(!discovered.includes(transactionHash))continue;
           }
           throw error;
         }
         if (!evidence.confirmed) {
-          if (previous?.status === 'confirmed') {
+          if (previous) {
             await rpc('record_karma_crypto_observation',{p_run_id:claim.run_id,p_payload:priorPayload(asset,previous,'reorged','not_confirmed_by_both_providers')});
           }
+          unresolved=true;
+          if(discovered.includes(transactionHash))unresolvedBatch=true;
           continue;
+        }
+        if(previous?.valuation_status==='valued'&&String(previous.amount_atomic)!==evidence.amount_atomic){
+          await rpc('record_karma_crypto_observation',{p_run_id:claim.run_id,p_payload:priorPayload(asset,previous,'needs_review','transaction_amount_changed')});
+          throw new Error('Valued transaction amount changed; manual review required');
         }
         result.verified++; totals.verified++;
         let valuation = null;
         try {
-          valuation = await valueWithTwoProviders(asset.asset_id,evidence.amount_atomic,evidence.observed_at,{providers:priceProviders,fetcher,retry});
+          valuation = previous?.valuation_status==='valued' ? {status:'valued',price_usd:previous.price_usd,amount_usd:previous.amount_usd,sources:previous.valuation_sources,valued_at:previous.valued_at} : await valueWithTwoProviders(asset.asset_id,evidence.amount_atomic,evidence.observed_at,{providers:priceProviders,fetcher,retry});
           result.valued++; totals.valued++;
         } catch (error) {
           result.valuation_error=safeError(error);
         }
         await rpc('record_karma_crypto_observation',{p_run_id:claim.run_id,p_payload:confirmedPayload(asset,evidence,valuation)});
-        if (Number.isSafeInteger(evidence.block_height) && (maxHeight == null || evidence.block_height > maxHeight)) {
-          maxHeight=evidence.block_height; maxHash=evidence.block_hash;
-        }
       }
+      if(unresolvedBatch&&batch.toBlock!=null)throw new Error('Unconfirmed batch candidate; checkpoint not advanced');
+      // Coverage advances only after every candidate has been saved successfully.
+      if(batch.toBlock!=null){maxHeight=batch.toBlock;maxHash=batch.blockHash;}
       await rpc('save_karma_crypto_checkpoint',{p_run_id:claim.run_id,p_asset_id:asset.asset_id,p_last_scanned_height:maxHeight,p_last_scanned_hash:maxHash,p_last_finalized_height:maxHeight,p_success:true,p_safe_error:null});
-      result.status='succeeded';
+      result.status=batch.complete&&!result.valuation_error&&!unresolved?'succeeded':'partial';
+      result.batches=batchIndex+1;
+      if(batch.complete||Date.now()>=deadline)break;
+      start=batch.toBlock+1;previousHash=batch.blockHash;
+      }
     } catch (error) {
       result.status='failed'; result.error=safeError(error);
       if (claim.mode !== 'health_check') {
@@ -147,7 +167,7 @@ export async function runCryptoScan(claim, {rpc, fetcher=fetch, priceProviders=D
 
   const active=details.assets.filter(item=>item.status!=='skipped');
   const failures=active.filter(item=>item.status==='failed').length;
-  const status=failures===0?'succeeded':failures===active.length?'failed':'partial';
+  const status=failures===0?(active.some(item=>item.status==='partial')?'partial':'succeeded'):failures===active.length?'failed':'partial';
   await rpc('finish_karma_crypto_scan_run',{p_run_id:claim.run_id,p_status:status,p_details:details,p_discovered:totals.discovered,p_verified:totals.verified,p_valued:totals.valued,p_safe_error:failures?safeError(new Error(`${failures} asset checks failed`)):null});
   return {status,...totals,details};
 }
