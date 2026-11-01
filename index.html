@@ -619,6 +619,73 @@ let submitting = false;
 let widgetConfigurationError = false;
 let securityState = 'securityWaiting';
 
+// Review-only: enabling analytics requires separate approval and deployment.
+const KARMA_ANALYTICS_ENABLED = false;
+const KARMA_ANALYTICS_ENDPOINT = ''; // Approved Worker HTTPS /collect URL after deployment.
+const analyticsPrivacy = {
+  en:'Anonymous analytics counts page loads and form steps without cookies or visitor IDs. No IP addresses or form contents are stored in analytics. DNT and Global Privacy Control are respected. Hosting providers process network requests.',
+  ru:'Обезличенная аналитика считает загрузки страницы и этапы формы без cookie и идентификаторов посетителей. IP-адреса и содержимое формы в аналитике не сохраняются. Учитываются DNT и Global Privacy Control. Провайдеры хостинга обрабатывают сетевые запросы.',
+  fr:'Les statistiques anonymes comptent les chargements et les étapes du formulaire sans cookies ni identifiants de visiteur. Elles ne conservent ni adresses IP ni contenu du formulaire. DNT et Global Privacy Control sont respectés. Les hébergeurs traitent les requêtes réseau.',
+  de:'Anonyme Statistik zählt Seitenaufrufe und Formularschritte ohne Cookies oder Besucherkennungen. IP-Adressen und Formularinhalte werden darin nicht gespeichert. DNT und Global Privacy Control werden beachtet. Hostinganbieter verarbeiten Netzwerkanfragen.',
+  es:'Las estadísticas anónimas cuentan cargas y pasos del formulario sin cookies ni identificadores de visitantes. No guardan direcciones IP ni contenido del formulario. Se respetan DNT y Global Privacy Control. Los proveedores de alojamiento procesan solicitudes de red.',
+  pt:'As estatísticas anônimas contam carregamentos e etapas do formulário sem cookies nem identificadores de visitantes. Não armazenam endereços IP nem o conteúdo do formulário. DNT e Global Privacy Control são respeitados. Os provedores de hospedagem processam solicitações de rede.'
+};
+const analyticsEvents = new Set([
+  'page_view', 'wall_view', 'form_view', 'form_start', 'submit_intent',
+  'validation_error', 'security_blocked', 'submit_attempt', 'submit_success',
+  'submit_error', 'security_error', 'rate_limited'
+]);
+const analyticsSent = new Set(); // Page lifetime only: no cookie, storage or visitor ID.
+function analyticsOnce(event) {
+  try {
+    if (!KARMA_ANALYTICS_ENABLED || document.visibilityState !== 'visible' ||
+        navigator.doNotTrack === '1' || window.doNotTrack === '1' ||
+        navigator.globalPrivacyControl === true || analyticsSent.has(event) || !analyticsEvents.has(event)) return;
+    const endpoint = new URL(KARMA_ANALYTICS_ENDPOINT);
+    if (endpoint.protocol !== 'https:' || endpoint.pathname !== '/collect' || endpoint.search ||
+        endpoint.hash || endpoint.username || endpoint.password || endpoint.origin === KARMA_SUPABASE_URL) return;
+    analyticsSent.add(event);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+    // Fixed enum only. No page URL, referrer, form values, language, country or token.
+    Promise.resolve().then(() => fetch(endpoint.href, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({event}), credentials:'omit', referrerPolicy:'no-referrer',
+      cache:'no-store', redirect:'error', keepalive:true, signal:controller.signal
+    })).catch(() => {}).finally(() => clearTimeout(timeout));
+  } catch { /* Measurement failures must never affect the site. No retry or logging. */ }
+}
+function initAnalytics() {
+  if (!KARMA_ANALYTICS_ENABLED) return;
+  let observer;
+  const onVisible = () => {
+    if (document.visibilityState !== 'visible') return;
+    analyticsOnce('page_view');
+    // Recheck exposure when a background/prerendered tab becomes visible.
+    if (observer) {
+      observer.disconnect();
+      observer.observe($('wall'));
+      observer.observe($('wishForm'));
+    }
+  };
+  // Observe actual exposure, rather than assuming a loaded widget was seen.
+  if (typeof IntersectionObserver === 'function') {
+    observer = new IntersectionObserver(entries => {
+      if (document.visibilityState !== 'visible') return;
+      for (const entry of entries) {
+        if (entry.isIntersecting && entry.intersectionRatio >= 0.1) {
+          analyticsOnce(entry.target.id === 'wall' ? 'wall_view' : 'form_view');
+        }
+      }
+    }, {threshold:0.1});
+  }
+  document.addEventListener('visibilitychange', onVisible);
+  onVisible();
+  const start = () => { analyticsOnce('form_view'); analyticsOnce('form_start'); };
+  $('wishForm').addEventListener('input', start);
+  $('wishForm').addEventListener('change', start);
+}
+
 function flag(code) {
   if (!/^[A-Z]{2}$/.test(code || '')) return '🌍';
   return String.fromCodePoint(...Array.from(code, letter => 127397 + letter.charCodeAt(0)));
@@ -654,6 +721,9 @@ function applyLanguage() {
   for (const element of document.querySelectorAll('[data-i]')) {
     const translated = translations[locale][element.dataset.i];
     if (translated) element.textContent = translated;
+  }
+  if (KARMA_ANALYTICS_ENABLED) {
+    document.querySelector('[data-i="privacyNote"]').textContent += ' ' + analyticsPrivacy[locale];
   }
   $('demoBanner').textContent = Array.isArray(paymentOptions) && paymentOptions.length
     ? messages[locale].bannerPaymentsActive : messages[locale].banner;
@@ -821,6 +891,7 @@ function renderTurnstile() {
       $('retrySecurity').classList.remove('hidden');
     },
     'error-callback': code => {
+      analyticsOnce('security_error');
       turnstileToken = '';
       const configurationError = ['110100', '110110', '110200', '400020', '400021', '400070'].includes(String(code));
       widgetConfigurationError = configurationError;
@@ -845,6 +916,7 @@ function loadTurnstile() {
   script.async = true;
   script.defer = true;
   script.onerror = () => {
+    analyticsOnce('security_error');
     securityState = 'securityFailed';
     $('securityResult').textContent = messages[locale][securityState];
     $('retrySecurity').classList.remove('hidden');
@@ -854,24 +926,28 @@ function loadTurnstile() {
 async function submitMessage(event) {
   event.preventDefault();
   if (submitting) return;
+  analyticsOnce('form_view');
+  analyticsOnce('submit_intent');
   const nickname = $('nickname').value.trim();
   const country_code = $('country').value;
   const message = $('message').value.trim();
   if (Array.from(nickname).length < 2 || Array.from(nickname).length > 40 ||
       !countryCodes.includes(country_code) || !message || Array.from(message).length > 500 || nickname.includes('\0') || message.includes('\0')) {
     setFormStatus('formInvalid');
+    analyticsOnce('validation_error');
     return;
   }
-  if (!$('consent').checked) { setFormStatus('formConsent'); return; }
+  if (!$('consent').checked) { setFormStatus('formConsent'); analyticsOnce('validation_error'); return; }
   const last = Number(safeStorage.get('karma-last-message-at') || 0);
-  if (Date.now() - last < 60000) { setFormStatus('formTooSoon'); return; }
-  if (!turnstileToken) { setFormStatus('formCaptcha'); return; }
+  if (Date.now() - last < 60000) { setFormStatus('formTooSoon'); analyticsOnce('rate_limited'); return; }
+  if (!turnstileToken) { setFormStatus('formCaptcha'); analyticsOnce('security_blocked'); return; }
   submitting = true;
   $('sendMessage').disabled = true;
   setFormStatus('formSending');
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
+    analyticsOnce('submit_attempt');
     const response = await fetch(KARMA_SUPABASE_URL + '/functions/v1/submit-karma-message', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -882,6 +958,9 @@ async function submitMessage(event) {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok || result.success !== true) {
+      analyticsOnce('submit_error');
+      if (response.status === 429) analyticsOnce('rate_limited');
+      if (response.status === 403) analyticsOnce('security_blocked');
       const errorLabels = {
         invalid_form_data: 'formInvalid', invalid_json: 'formInvalid', request_too_large: 'formTooLarge',
         verification_expired: 'formExpired', security_verification_failed: 'formCaptcha',
@@ -897,7 +976,9 @@ async function submitMessage(event) {
     $('wishForm').reset();
     resetTurnstile();
     setFormStatus('formSuccess', true);
+    analyticsOnce('submit_success');
   } catch {
+    analyticsOnce('submit_error');
     resetTurnstile();
     setFormStatus('formUnavailable');
   } finally {
@@ -1002,6 +1083,7 @@ document.addEventListener('visibilitychange', () => {
 });
 // The server keeps payments fail-closed until the owner completes the final launch checks.
 applyLanguage();
+try { initAnalytics(); } catch { /* Optional telemetry must not block initialization. */ }
 refreshKarma();
 loadTurnstile();
 </script></body></html>

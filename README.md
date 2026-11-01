@@ -8,6 +8,8 @@ Payments remain disabled. The crypto preparation interface names five assets and
 
 Run local checks with `npm ci --ignore-scripts` and `npm test`. `tests/database_contract.sql` performs real database checks with rollback; its ranking fixtures require an empty contribution table or an isolated database. It must never be used to delete live records.
 
+Privacy-first analytics is prepared in `analytics/` and **disabled by default**. It requires separate owner approval and provisioning before launch. A Cloudflare Worker writes only daily event counts to a dedicated D1 binding; it needs no Supabase key or changes to the message/payment infrastructure. See [the Russian technical review and launch instructions](docs/privacy-analytics-20261101-ru.md). No automatic deployment workflow is added.
+
 Supabase migrations preserve existing records, keep raw tables private, record publication consent, add request limits and an atomic Turnstile token claim, and use common-currency ranking values. `supabase/functions/submit-karma-message/index.ts` is the deployed version 4 source, with JWT verification kept off because the endpoint validates Turnstile and only calls private write RPCs. Configuration secrets belong only in Supabase, never in this repository.
 
 One real Turnstile submission succeeded on version 3. Its repeated request reached the duplicate-message guard, so version 4 added a separate atomic token claim. A real replay test against version 4 remains required. Crypto activation separately requires receiving-address approval, sender attribution, receipt-time valuation, a scheduler with trusted providers, and jurisdiction-specific legal/tax review.

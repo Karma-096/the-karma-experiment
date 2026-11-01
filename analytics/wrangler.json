@@ -1,0 +1,21 @@
+{
+  "name": "karma-private-analytics",
+  "main": "collector.mjs",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "logpush": false,
+  "observability": {
+    "enabled": false,
+    "logs": { "enabled": false, "invocation_logs": false },
+    "traces": { "enabled": false }
+  },
+  "vars": {
+    "ANALYTICS_ENABLED": "false"
+  },
+  "d1_databases": [{
+    "binding": "ANALYTICS_DB",
+    "database_name": "karma-private-analytics",
+    "database_id": "00000000-0000-0000-0000-000000000000"
+  }]
+}
